@@ -14,7 +14,6 @@ const SUGGESTIONS = [
 
 function loadChats(): Conversation[] {
   try {
-    localStorage.removeItem('ai-chat-messages')
     const raw = localStorage.getItem(STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : []
     return Array.isArray(parsed) ? (parsed as Conversation[]) : []
@@ -25,13 +24,15 @@ function loadChats(): Conversation[] {
 
 export default function App() {
   const [chats, setChats] = useState<Conversation[]>(loadChats)
-  const [activeId, setActiveId] = useState(() => crypto.randomUUID())
+  // Explicitly typed as string to prevent Vercel template literal type mismatches
+  const [activeId, setActiveId] = useState<string>(() => crypto.randomUUID())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [dark, setDark] = useState(() => localStorage.getItem('theme') === 'dark')
+
   const abortRef = useRef<AbortController | null>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement | null>(null)
 
   const activeChat = chats.find((c) => c.id === activeId)
   const messages: Message[] = activeChat?.messages ?? []
@@ -41,28 +42,46 @@ export default function App() {
     [chats]
   )
 
+  // One-time legacy cleanup
+  useEffect(() => {
+    localStorage.removeItem('ai-chat-messages')
+  }, [])
+
+  // Dark mode handler
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
     localStorage.setItem('theme', dark ? 'dark' : 'light')
   }, [dark])
 
+  // Sync chats to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(chats))
     } catch {
-      // ignore storage errors
+      // Ignore storage quota/access errors
     }
   }, [chats])
 
+  // Scroll to bottom (instant during stream to prevent smooth-scroll lag)
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [activeChat?.messages])
+    bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
+  }, [messages.length, busy])
+
+  // Abort ongoing requests on component unmount
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
 
   async function handleSend(text: string) {
     setError(null)
     const chatId = activeId
-    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: text }
-    const botMsg: Message = { id: crypto.randomUUID(), role: 'assistant', content: '' }
+    const userMsgId = crypto.randomUUID()
+    const botMsgId = crypto.randomUUID()
+
+    const userMsg: Message = { id: userMsgId, role: 'user', content: text }
+    const botMsg: Message = { id: botMsgId, role: 'assistant', content: '' }
     const history = [...messages, userMsg]
 
     setChats((prev) => {
@@ -75,8 +94,8 @@ export default function App() {
       }
       return existing ? prev.map((c) => (c.id === chatId ? updated : c)) : [updated, ...prev]
     })
-    setBusy(true)
 
+    setBusy(true)
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -90,7 +109,7 @@ export default function App() {
                 ? {
                     ...c,
                     messages: c.messages.map((m) =>
-                      m.id === botMsg.id ? { ...m, content: m.content + token } : m
+                      m.id === botMsgId ? { ...m, content: m.content + token } : m
                     ),
                   }
                 : c
@@ -108,18 +127,20 @@ export default function App() {
         )
       }
     } finally {
-      setChats((prev) =>
-        prev.map((c) =>
-          c.id === chatId
-            ? {
-                ...c,
-                messages: c.messages.filter((m) => m.role === 'user' || m.content !== ''),
-              }
-            : c
+      if (abortRef.current === controller) {
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  messages: c.messages.filter((m) => m.role === 'user' || m.content !== ''),
+                }
+              : c
+          )
         )
-      )
-      setBusy(false)
-      abortRef.current = null
+        setBusy(false)
+        abortRef.current = null
+      }
     }
   }
 
@@ -135,6 +156,7 @@ export default function App() {
   }
 
   function handleSelect(id: string) {
+    if (id === activeId) return
     abortRef.current?.abort()
     setActiveId(id)
     setError(null)
@@ -172,7 +194,9 @@ export default function App() {
             >
               ☰
             </button>
-            <h1 className="text-lg font-medium text-[#0d0d0d] dark:text-[#ececec]">Sushil's Chatbot</h1>
+            <h1 className="text-lg font-medium text-[#0d0d0d] dark:text-[#ececec]">
+              Sushil's Chatbot
+            </h1>
           </div>
           <button
             onClick={() => setDark(!dark)}
